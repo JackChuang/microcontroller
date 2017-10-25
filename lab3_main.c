@@ -54,11 +54,11 @@ static volatile uint8_t readdata;
 
 // All 3 CCR configs for the 3 pins of the RGB LED
 
-// Lab2
-//uint32_t RED_LED_ENABLED = 0;
-//uint32_t RED_LED_STATUS = 0;
+// Lab3 parsing
+static volatile char str[4];
+
+// Lab3
 volatile uint32_t debounced = 0;
-//uint32_t MODE = 0, RGB[3] = {1, 2, 4};
 #define MY_DCO_FREQUENCY_12 12000000
 static unsigned int curr_t = 0;
 static bool running = false;
@@ -70,7 +70,7 @@ void start_debounce_timer()
     MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
 }
 
-void start_LED_timer()
+void start_watch_timer()
 {
     running = true;
     //MAP_Timer32_setCount(TIMER32_1_BASE,MY_DCO_FREQUENCY_12);
@@ -79,7 +79,7 @@ void start_LED_timer()
     //MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
 }
 
-void stop_LED_timer()
+void stop_watch_timer()
 {
     running = false;
     //MAP_Timer32_clearInterruptFlag(TIMER32_1_BASE);
@@ -95,7 +95,6 @@ extern void T32_INT1_IRQHandler(){
     //MAP_Timer32_disableInterrupt(TIMER32_1_BASE);
     MAP_GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);//debug 1s
     curr_t++;
-    //RED_LED_STATUS = RED_LED_STATUS ? 0:1;
 
     //MAP_Timer32_setCount(TIMER32_1_BASE,3000000*(1+(MODE%3)));
     //MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
@@ -104,41 +103,6 @@ extern void T32_INT1_IRQHandler(){
 //    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~END CODE FOR LAB 2 led cycling
 }
 
-void handle_button_1(uint32_t status)
-{
-    MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1,status);
-    MAP_GPIO_disableInterrupt(GPIO_PORT_P1, GPIO_PIN1);
-
-    MAP_GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);
-/*
-        if(RED_LED_ENABLED)
-        {
-            MAP_GPIO_setOutputLowOnPin(GPIO_PORT_P1, GPIO_PIN0);
-            stop_LED_timer();
-            RED_LED_STATUS = 0;
-            RED_LED_ENABLED = 0;
-        }
-        else
-        {
-            MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0);
-            RED_LED_STATUS = 1;
-            start_LED_timer();
-            RED_LED_ENABLED = 1;
-        }
-*/
-        MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN1);
-}
-
-void handle_button_2(uint32_t status)
-{
-    MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, status);
-    MAP_GPIO_disableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
-
-    //MAP_GPIO_setOutputLowOnPin(GPIO_PORT_P2, RGB[MODE%3]);
-    //MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2,RGB[++MODE%3]);
-
-    MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
-}
 
 // PROVIDED: Timer_A struct for our debounce timer, triggering its interrupt when it hits its period value in CCR0
 Timer_A_UpModeConfig debounce_Config =
@@ -220,9 +184,9 @@ int main(void)
     MAP_Timer32_setCount(TIMER32_1_BASE, MY_DCO_FREQUENCY_12);
     MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
     MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
-    start_LED_timer();
+    start_watch_timer();
 
-    // debuncing timer
+    // debouncing timer
     MAP_Timer32_initModule(TIMER32_0_BASE, TIMER32_PRESCALER_1, TIMER32_32BIT, TIMER32_PERIODIC_MODE);
     MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
 
@@ -324,20 +288,38 @@ void show_time(void)
            curr_t, running?"(O)":"(X)");
 }
 
-void LED(int state, int num_cnt)
+void LED(int state, volatile char* s, int cnt)
 {
     /*  [state]
      *  0: no light (impossible)
      *  1: r
      *  2: g
      *  3: b
-     *  num_cnt: 0 ~ 255
+     *  num_str: "0" ~ "255"
+     *  num_cnt = 1 ~ 3
      */
-    if(num_cnt > 0) {
-        MAP_GPIO_setOutputLowOnPin(GPIO_PORT_P2, 1);
+    if(cnt > 0) {
+        MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN1);
+
+        printf(EUSCI_A0_BASE, "s %c \r\n", s);
+        printf(EUSCI_A0_BASE, "s %c \r\n", s+1);
+        printf(EUSCI_A0_BASE, "s %c \r\n", s+2);
+
+        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s, 1));
+        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s+1, 1));
+        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s+2, 1));
+
+        printf(EUSCI_A0_BASE, "LED %i num %i\r\n",
+                       state, atoi(s, cnt));
+        //printf(EUSCI_A0_BASE, "LED %i num_cnt %i\%\r\n",
+        //       state, (atoi(s, cnt)*100)/255);
     }
     else {
-        MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, 1);
+        //wrong
+        printf(EUSCI_A0_BASE, "WRONG\r\n\r\n\r\n");
+        //MAP_GPIO_setOutputLowOnPin(GPIO_PORT_P2, 1);
+        //printf(EUSCI_A0_BASE, "LED %i num_cnt %i\%\r\n",
+        //               state, (atoi(s, cnt)*100)/255);
     }
 
 }
@@ -358,93 +340,69 @@ void EUSCIA0_IRQHandler(void)
 
     MAP_UART_clearInterruptFlag(EUSCI_A0_BASE, status);
 
-    if(status & EUSCI_A_UART_RECEIVE_INTERRUPT_FLAG)
-    {
+    if(status & EUSCI_A_UART_RECEIVE_INTERRUPT_FLAG) {
         readdata = MAP_UART_receiveData(EUSCI_A0_BASE);
-
         if (readdata == 'r') {
-            state = 1;
-
-        } else if (readdata == 'g') {
-            state = 2;
-
-        } else if (readdata == 'b') {
-            state = 3;
-
-        } else if ( is_number(readdata)) {
-            num_cnt++;
-            if (state>0 && num_cnt >=3 ) {
-                num_cnt++;
-                if (num_cnt>=3){
-                    //LED(state, num_cnt);
-                    {
-                    state = 0;
-                    num_cnt = 0;
-                    }
-                }
-            } else if (state == 0) {
-                echo(readdata);
+            if (num_cnt > 0 && state != 0 && *str) {
+                LED(state, str, num_cnt);
+                num_cnt = 0;
+                *str = 0;
             }
+            state = 1;
+        } else if (readdata == 'g') {
+            if (num_cnt > 0 && state != 0 && *str) {
+                LED(state, str, num_cnt);
+                num_cnt = 0;
+                *str = 0;
+            }
+            state = 2;
+        } else if (readdata == 'b') {
+            if (num_cnt > 0 && state != 0 && *str) {
+                LED(state, str, num_cnt);
+                num_cnt = 0;
+                *str = 0;
+            }
+            state = 3;
         } else if (readdata == 's') {
             if (running)
-                stop_LED_timer();
+                stop_watch_timer();
             else
-                start_LED_timer();
+                start_watch_timer();
         } else if (readdata == '!') {
-            stop_LED_timer();
+            stop_watch_timer();
             MAP_Timer32_setCount(TIMER32_1_BASE, MY_DCO_FREQUENCY_12);
             curr_t = 0;
         } else if (readdata == 'p') {
             show_time();
-        }
-        else {
+        } else if (is_number(readdata)) {
+            num_cnt++;
+            if (state > 0 && num_cnt >= 3 && *str ) { // rxxx/gxxx/bxxx
+                //save the char
+                *(str + num_cnt - 1) = readdata; // data
+                *(str + num_cnt) = 0;   // end char
+
+                LED(state, str, num_cnt);
+                state = 0;
+                num_cnt = 0;
+                *str = 0;
+                goto out;
+            } else if (state == 0) { // no r,g,b command before
+                echo(readdata);
+                goto out;
+            }
+            //save the char
+            *(str + num_cnt - 1) = readdata; // data
+            *(str + num_cnt) = 0;   // end char
+
+        } else {
             state = 0;
+            num_cnt = 0;
+            *str = 0;
             echo(readdata);
         }
-        // Toggle Red LED if the character received is an "L":
-        if (readdata == 'L') {  // 'L' is 76 in the ASCII table
-        // if (readdata == 76) {  // This also works.
-
-            MAP_GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);
-
-            const char mytext[] = "\n\rToggle LED\n\r";
-            int ichar;
-            for (ichar=0; ichar<14; ichar++) {
-                MAP_UART_transmitData(EUSCI_A0_BASE,mytext[ichar]);
-            }
-
-            char *s = "printf test";
-            char c = '!';
-            int i = -12345;
-            unsigned u = 4321;
-            long int l = -123456780;
-            long unsigned n = 1098765432;
-            unsigned x = 0xABCD;
-
-
-            // Also must #include "printf.h" at the top of the file, and put
-            // printf.h, printf.c as part of the project.
-            printf(EUSCI_A0_BASE, "String         %s\r\n", s);
-            printf(EUSCI_A0_BASE, "Char           %c\r\n", c);
-            printf(EUSCI_A0_BASE, "Integer        %i\r\n", i);
-            printf(EUSCI_A0_BASE, "Unsigned       %u\r\n", u);
-            printf(EUSCI_A0_BASE, "Long           %l\r\n", l);
-            printf(EUSCI_A0_BASE, "uNsigned loNg  %n\r\n", n);
-            printf(EUSCI_A0_BASE, "heX            %x\r\n", x);
-
-            // This output goes to the CONSOLE, NOT THE TERMINAL:
-            // It is slow because it uses JTAG
-            // Must also #include <stdio.h> at the top of the file to get it to work.
-            // Don't do this!
-//            printf("Printed!\n\r");
-//            printf("%d\n\r",12345);
-        }
-
     }
-
+out:
 }
-
-
 
 // TODO: Lab3: Button Interrupt, Debounce Interrupt, and Stopwatch Interrupt ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 extern void PORT1_IRQHandler(){
@@ -480,7 +438,7 @@ extern void TA2_0_IRQHandler(){
 
 extern void T32_INT0_IRQHandler(){
     //      Stopwatch Interrupt: Complains about stopwatch count running out in the far, far future
-    // Jack: debuncing reset debuncing timer
+    // Jack: debouncing reset debouncing timer
     MAP_Timer32_clearInterruptFlag(TIMER32_0_BASE);
     MAP_Timer32_disableInterrupt(TIMER32_0_BASE);
     debounced = 0;
