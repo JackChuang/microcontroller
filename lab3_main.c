@@ -47,59 +47,56 @@ const eUSCI_UART_Config uartConfig =
         EUSCI_A_UART_MODE,                       // UART mode
         EUSCI_A_UART_OVERSAMPLING_BAUDRATE_GENERATION  // Oversampling
 };
-static volatile uint8_t readdata;
+volatile uint8_t readdata;
 
 
 // Timer_A for driving RGB LED via PWM
 
 // All 3 CCR configs for the 3 pins of the RGB LED
 
-// Lab3 parsing
-static volatile char str[4];
-
-// Lab3
-volatile uint32_t debounced = 0;
+/* Lab3 general config */
 #define MY_DCO_FREQUENCY_12 12000000
-static unsigned int curr_t = 0;
-static bool running = false;
+volatile uint32_t debounced = 0;
+
+/* Lab3 global states */
+/* parsing state */
+/*  0: no light
+ *  1: r
+ *  2: g
+ *  3: b        */
+volatile int state = 0;
+volatile int num_cnt = 0;
+volatile char str[4];
+/* watch timer */
+volatile bool running = true;    //todo init state?
+volatile unsigned int curr_t = 0;
+
 void start_debounce_timer()
 {
-    MAP_Timer32_setCount(TIMER32_0_BASE,MY_DCO_FREQUENCY_12/200);   // 20ms
-    MAP_Timer32_enableInterrupt(TIMER32_0_BASE);
-    MAP_Timer32_startTimer(TIMER32_0_BASE, true);
-    MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
+    MAP_Timer32_setCount(TIMER32_1_BASE, (MY_DCO_FREQUENCY_12)/200);   // 20ms
+    MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
+    MAP_Timer32_startTimer(TIMER32_1_BASE, true);
+    //MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT); // todo: testing
 }
 
 void start_watch_timer()
 {
     running = true;
-    //MAP_Timer32_setCount(TIMER32_1_BASE,MY_DCO_FREQUENCY_12);
-    //MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
-    MAP_Timer32_startTimer(TIMER32_1_BASE, false); // , oneshot
-    //MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
+    MAP_Timer32_startTimer(TIMER32_0_BASE, false); // (xxx, oneshot)
 }
 
 void stop_watch_timer()
 {
     running = false;
-    //MAP_Timer32_clearInterruptFlag(TIMER32_1_BASE);
-    MAP_Timer32_haltTimer(TIMER32_1_BASE);
-    //MAP_Timer32_disableInterrupt(TIMER32_1_BASE);
-    //MAP_Interrupt_disableInterrupt(TIMER32_1_INTERRUPT);
+    MAP_Timer32_haltTimer(TIMER32_0_BASE);
 }
 
-extern void T32_INT1_IRQHandler(){
+extern void T32_INT0_IRQHandler(){
 //    TODO: Lab2: Change LED on/off status and prepare any necessary interrupts to fire again
 //    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CODE FOR LAB2 LED cycling here
-    MAP_Timer32_clearInterruptFlag(TIMER32_1_BASE);
-    //MAP_Timer32_disableInterrupt(TIMER32_1_BASE);
-    MAP_GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);//debug 1s
+    MAP_Timer32_clearInterruptFlag(TIMER32_0_BASE);
+    MAP_GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);    //debug 1s
     curr_t++;
-
-    //MAP_Timer32_setCount(TIMER32_1_BASE,3000000*(1+(MODE%3)));
-    //MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
-    //MAP_Timer32_startTimer(TIMER32_1_BASE, false);
-
 //    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~END CODE FOR LAB 2 led cycling
 }
 
@@ -180,29 +177,22 @@ int main(void)
 //            (Struct for Timer A2 is provided, such that when it hits its CCR0 an interrupt is triggered
 //          Start with the stopwatch paused, so it only starts actually counting in response to the relevant UART commands
 //        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ENTER CODE FOR LAB3 stopwatch init HERE:
+    // debouncing timer
     MAP_Timer32_initModule(TIMER32_1_BASE, TIMER32_PRESCALER_1, TIMER32_32BIT, TIMER32_PERIODIC_MODE);
-    MAP_Timer32_setCount(TIMER32_1_BASE, MY_DCO_FREQUENCY_12);
-    MAP_Timer32_enableInterrupt(TIMER32_1_BASE);
-    MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
+    // watch timer
+    MAP_Timer32_initModule(TIMER32_0_BASE, TIMER32_PRESCALER_1, TIMER32_32BIT, TIMER32_PERIODIC_MODE);
+    MAP_Timer32_setCount(TIMER32_0_BASE, MY_DCO_FREQUENCY_12);
+    MAP_Timer32_enableInterrupt(TIMER32_0_BASE);
     start_watch_timer();
 
-    // debouncing timer
-    MAP_Timer32_initModule(TIMER32_0_BASE, TIMER32_PRESCALER_1, TIMER32_32BIT, TIMER32_PERIODIC_MODE);
-    MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
-
-
     // buttoms (IMPORTANT P1.1 IS USED BY UART IN THIS LAB AS WELL!!!!!!!!!!!)
-    //MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, GPIO_PIN1);
-    //MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN1);
     MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, GPIO_PIN4);
     MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
-    MAP_Interrupt_enableInterrupt(INT_PORT1);
-
 
     /* Enabling all lab2 interrupts */
-    //MAP_Interrupt_enableInterrupt(INT_PORT1);
-    //MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
-    //MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
+    MAP_Interrupt_enableInterrupt(INT_PORT1);
+    MAP_Interrupt_enableInterrupt(TIMER32_1_INTERRUPT);
+    MAP_Interrupt_enableInterrupt(TIMER32_0_INTERRUPT);
 //        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ End CODE FOR LAB3 stopwatch init
 
 
@@ -233,16 +223,16 @@ int main(void)
 
 // Helper function to clarify UART command behavior
 // TODO: Lab3: Resumes, Pauses, or Restarts stopwatch depending on restart flag and the stopwatch state
-static void startStopStopwatch(bool restart){
-
-}
+//static void startStopStopwatch(bool restart){
+//
+//}
 // END Stopwatch State Helper Function Definition ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // Helper function for sampling stopwatch. This avoids code duplication between UART and button sampling
 // TODO: Lab3: Sample current stopwatch value, convert to number of elapsed milliseconds, and transmit to computer
-void stopwatchSample(){
-
-}
+//void stopwatchSample(){
+//
+//}
 // END Sample Stopwatch code ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // PROVIDED: Converts a string of numeric characters into their corresponding whole number.
@@ -295,31 +285,16 @@ void LED(int state, volatile char* s, int cnt)
      *  1: r
      *  2: g
      *  3: b
-     *  num_str: "0" ~ "255"
+     *  num_str: "0\0" ~ "255\0"
      *  num_cnt = 1 ~ 3
      */
     if(cnt > 0) {
         MAP_GPIO_setOutputHighOnPin(GPIO_PORT_P2, GPIO_PIN1);
-
-        printf(EUSCI_A0_BASE, "s %c \r\n", s);
-        printf(EUSCI_A0_BASE, "s %c \r\n", s+1);
-        printf(EUSCI_A0_BASE, "s %c \r\n", s+2);
-
-        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s, 1));
-        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s+1, 1));
-        printf(EUSCI_A0_BASE, "1 %i \r\n", atoi(s+2, 1));
-
         printf(EUSCI_A0_BASE, "LED %i num %i\r\n",
-                       state, atoi(s, cnt));
-        //printf(EUSCI_A0_BASE, "LED %i num_cnt %i\%\r\n",
-        //       state, (atoi(s, cnt)*100)/255);
+               state, atoi(s, cnt));
     }
     else {
-        //wrong
-        printf(EUSCI_A0_BASE, "WRONG\r\n\r\n\r\n");
-        //MAP_GPIO_setOutputLowOnPin(GPIO_PORT_P2, 1);
-        //printf(EUSCI_A0_BASE, "LED %i num_cnt %i\%\r\n",
-        //               state, (atoi(s, cnt)*100)/255);
+        printf(EUSCI_A0_BASE, "WRONG! SHOULDN'T BE HERE!!!\r\n\r\n\r\n");
     }
 
 }
@@ -327,19 +302,8 @@ void LED(int state, volatile char* s, int cnt)
 /* EUSCI A0 UART ISR - Echoes data back to PC host */
 void EUSCIA0_IRQHandler(void)
 {
-    static int state = 0;
-    /*
-     *  0: no light
-     *  1: r
-     *  2: g
-     *  3: b
-     */
-    static int num_cnt = 0;
-
     uint32_t status = MAP_UART_getEnabledInterruptStatus(EUSCI_A0_BASE);
-
     MAP_UART_clearInterruptFlag(EUSCI_A0_BASE, status);
-
     if(status & EUSCI_A_UART_RECEIVE_INTERRUPT_FLAG) {
         readdata = MAP_UART_receiveData(EUSCI_A0_BASE);
         if (readdata == 'r') {
@@ -370,30 +334,26 @@ void EUSCIA0_IRQHandler(void)
                 start_watch_timer();
         } else if (readdata == '!') {
             stop_watch_timer();
-            MAP_Timer32_setCount(TIMER32_1_BASE, MY_DCO_FREQUENCY_12);
+            MAP_Timer32_setCount(TIMER32_0_BASE, MY_DCO_FREQUENCY_12);
             curr_t = 0;
         } else if (readdata == 'p') {
             show_time();
         } else if (is_number(readdata)) {
-            num_cnt++;
-            if (state > 0 && num_cnt >= 3 && *str ) { // rxxx/gxxx/bxxx
-                //save the char
-                *(str + num_cnt - 1) = readdata; // data
-                *(str + num_cnt) = 0;   // end char
-
-                LED(state, str, num_cnt);
-                state = 0;
-                num_cnt = 0;
-                *str = 0;
-                goto out;
-            } else if (state == 0) { // no r,g,b command before
+            if (state == 0) { /* no r,g,b command before */
                 echo(readdata);
                 goto out;
             }
-            //save the char
-            *(str + num_cnt - 1) = readdata; // data
-            *(str + num_cnt) = 0;   // end char
 
+            num_cnt++;
+            /* save the char */
+            *(str + num_cnt - 1) = readdata;    /* data */
+            *(str + num_cnt) = 0;               /* maintaining end char manually */
+            if (state > 0 && num_cnt >= 3 && *str ) { /* rxxx/gxxx/bxxx */
+                LED(state, str, num_cnt);
+                state = 0;
+                num_cnt = 0;
+                *str = 0;   /* clear string */
+            }
         } else {
             state = 0;
             num_cnt = 0;
@@ -402,6 +362,7 @@ void EUSCIA0_IRQHandler(void)
         }
     }
 out:
+    return;
 }
 
 // TODO: Lab3: Button Interrupt, Debounce Interrupt, and Stopwatch Interrupt ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -414,21 +375,12 @@ extern void PORT1_IRQHandler(){
 
     uint32_t status;
     status = MAP_GPIO_getEnabledInterruptStatus(GPIO_PORT_P1);
-    /*
-    if (GPIO_PIN1 & status) {
-        MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, GPIO_PIN1);
-        MAP_GPIO_disableInterrupt(GPIO_PORT_P1, GPIO_PIN1);
-        show_time();
-        MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN1);
-    }
-    */
     if (GPIO_PIN4 & status) {
         MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, GPIO_PIN4);
         MAP_GPIO_disableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
         show_time();
         MAP_GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
     }
-    //MAP_GPIO_clearInterruptFlag(GPIO_PORT_P1, status);
 }
 
 extern void TA2_0_IRQHandler(){
@@ -436,11 +388,11 @@ extern void TA2_0_IRQHandler(){
 //          prevents TA2 from cycling again like it normally would.
 }
 
-extern void T32_INT0_IRQHandler(){
+extern void T32_INT1_IRQHandler(){
     //      Stopwatch Interrupt: Complains about stopwatch count running out in the far, far future
     // Jack: debouncing reset debouncing timer
-    MAP_Timer32_clearInterruptFlag(TIMER32_0_BASE);
-    MAP_Timer32_disableInterrupt(TIMER32_0_BASE);
+    MAP_Timer32_clearInterruptFlag(TIMER32_1_BASE);
+    MAP_Timer32_disableInterrupt(TIMER32_1_BASE);
     debounced = 0;
 }
 
