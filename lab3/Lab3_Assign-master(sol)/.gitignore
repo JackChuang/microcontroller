@@ -1,0 +1,6 @@
+*.obj
+Debug
+Release\*
+.xdchelp
+.config
+.launches
