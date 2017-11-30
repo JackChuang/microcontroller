@@ -6,6 +6,13 @@
 #include <stdbool.h>
 #include "printf.h"
 
+// 2^14 = 16384
+// adc 16383 = 3.3v (with divider) => 5v
+// adc 0 = 0v => 0v
+// (39*1000*(3.3/16384)) * (5/3.3) = 11.9 uA
+// (readdata*1000*(3.3/16384)) * (5/3.3) = uA
+// when no load, measured by multimeter = 0.016(0% duty) ~ 0.02(100% duty)
+
 #define LEFT TIMER_A_CAPTURECOMPARE_REGISTER_1
 #define RIGHT TIMER_A_CAPTURECOMPARE_REGISTER_2
 int16_t SpeedVal = 0;
@@ -294,13 +301,19 @@ void EUSCIA0_IRQHandler(void)
         }
 
         // ~~~~~~~~~~ EDIT HERE ~~~~~~~~~~ to add L and R
-        if(readdata >= '0' && readdata <= '9' ){
-            SpeedVal = ((((readdata - '0')*10)*MAX_PWM_CNT)/100); // 0% to 90% duty cycle / Max counter value is 320
+        if( (readdata >= '0' && readdata <= '9') || readdata == 'f'){
+            if (readdata != 'f') {
+                SpeedVal = ((((readdata - '0')*10)*MAX_PWM_CNT)/100); // 0% to 90% duty cycle / Max counter value is 320
+            }
+            else if (readdata == 'f') {
+                SpeedVal = MAX_PWM_CNT;
+            }
             Timer_A_setCompareValue(TIMER_A1_BASE, LeftRight, SpeedVal); //PWM
-            printf(EUSCI_A0_BASE, "Mode %s Speed %i duty cycle\r\n",
+            printf(EUSCI_A0_BASE, "Mode %s Speed %i% duty cycle\r\n",
                                    LeftRight==LEFT?"Left":"Right", ((SpeedVal*100)/MAX_PWM_CNT));
             //printf(EUSCI_A0_BASE, "%i\r\n", SpeedVal);
         }
+
         if(readdata == 'l') {
             LeftRight = LEFT;
             printf(EUSCI_A0_BASE,"Mode: Left\n\r");
@@ -319,23 +332,33 @@ void ADC14_IRQHandler(void)
     uint64_t status;
     static uint64_t cnt = 0;
     static uint16_t adcLeftVal = 0, adcRightVal = 0;
-
+    static uint16_t SumLeft = 0, SumRight = 0;
     status = MAP_ADC14_getEnabledInterruptStatus();
     MAP_ADC14_clearInterruptFlag(status);
 
     if (status & ADC_INT0) { //A0 reading, on P5.5
-        adcLeftVal = ADC14_getResult(ADC_MEM0);
-        printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r");
+        adcLeftVal = ADC14_getResult(ADC_MEM0); //debug
+        SumLeft += (adcLeftVal*1000*5/16384);
+        //printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r");
     }
     else if (status & ADC_INT1) {
-        adcRightVal = ADC14_getResult(ADC_MEM1);
-        printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r");
+        adcRightVal = ADC14_getResult(ADC_MEM1); //debug
+        SumRight += (adcRightVal*1000*5/16384);
+        //printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r");
     }
     cnt++;
     if(cnt>=100) {
         cnt = 0;
-        printf(EUSCI_A0_BASE, "Left %u Right %u\n\r",
-                               adcLeftVal, adcRightVal);  //This call is blocking!!
+        //printf(EUSCI_A0_BASE, "Left %u (MEM0) Right %u (MEM1)\n\r",
+        //                       adcLeftVal, adcRightVal);  //This call is blocking!!
+
+        printf(EUSCI_A0_BASE, "Left %u uA (MEM0), Right %u uA(MEM1)\n\r",
+                                   SumLeft/100,
+                                   SumRight/100);
+                               //(adcLeftVal*1000*5/16384),
+                               //(adcRightVal*1000*5/16384));
+        SumLeft=0;
+        SumRight=0;
     }
 }
 
