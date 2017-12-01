@@ -15,9 +15,18 @@
 
 #define LEFT TIMER_A_CAPTURECOMPARE_REGISTER_1
 #define RIGHT TIMER_A_CAPTURECOMPARE_REGISTER_2
-int16_t SpeedVal = 0;
-uint_fast16_t LeftRight = LEFT;
+volatile int16_t SpeedVal = 0;
+volatile uint_fast16_t LeftRight = LEFT;
+volatile char str[12]; // MIN = "RXXXLYYY." MAX = "R-XXXL-YYY."
+volatile int num = 0;
 
+//volatile bool IsDirFront = trun;            // is direction front
+void clear(void) {
+    int i;
+    for (i=0; i<=12; i++)
+        str[i] = 0;
+    num = 0;
+}
 uint16_t atoi(volatile char* s, uint8_t l){
     uint16_t r = 0;
     uint8_t i;
@@ -25,6 +34,14 @@ uint16_t atoi(volatile char* s, uint8_t l){
         r = 10*r + (s[i]-'0');
     }
     return r;
+}
+void DirectionFront() {
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN2);
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN3);
+}
+void DirectionBack() {
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN2);
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN3);
 }
 
 /* ADC-driving timer */
@@ -59,7 +76,7 @@ const Timer_A_UpModeConfig debounceConfig =
 
 // ~~~~~ EDIT HERE ~~~~~~~ all config structs (timera & ccrs) for PWM generation from Prelab 5
 // TIMER_A1 PWM upper bond
-#define MAX_PWM_CNT 320
+#define MAX_PWM_CNT 999
 Timer_A_UpModeConfig pwm_Config =
 {
      TIMER_A_CLOCKSOURCE_SMCLK,
@@ -179,6 +196,8 @@ int main(void)
 
     // ~~~~~ EDIT HERE ~~~~~~~ add in the GPIO pins for telling the motor driver forward or back
     // TODO: OUTPUT PIN * 2
+    GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN1 + GPIO_PIN2 + GPIO_PIN3);
+    DirectionFront();
 
     // SETUP UART
     MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P1,
@@ -250,6 +269,7 @@ void handleLongCmd(char cmd, int16_t number){
 // UART Interrupt (receives commands)
 void EUSCIA0_IRQHandler(void)
 {
+    int i = 0;
     uint32_t status = MAP_UART_getEnabledInterruptStatus(EUSCI_A0_BASE);
 
     MAP_UART_clearInterruptFlag(EUSCI_A0_BASE, status);
@@ -301,6 +321,7 @@ void EUSCIA0_IRQHandler(void)
         }
 
         // ~~~~~~~~~~ EDIT HERE ~~~~~~~~~~ to add L and R
+        /*
         if( (readdata >= '0' && readdata <= '9') || readdata == 'f'){
             if (readdata != 'f') {
                 SpeedVal = ((((readdata - '0')*10)*MAX_PWM_CNT)/100); // 0% to 90% duty cycle / Max counter value is 320
@@ -313,7 +334,6 @@ void EUSCIA0_IRQHandler(void)
                                    LeftRight==LEFT?"Left":"Right", ((SpeedVal*100)/MAX_PWM_CNT));
             //printf(EUSCI_A0_BASE, "%i\r\n", SpeedVal);
         }
-
         if(readdata == 'l') {
             LeftRight = LEFT;
             printf(EUSCI_A0_BASE,"Mode: Left\n\r");
@@ -321,8 +341,75 @@ void EUSCIA0_IRQHandler(void)
         else if(readdata == 'r') {
             LeftRight = RIGHT;
             printf(EUSCI_A0_BASE,"Mode: Right\n\r");
+        }*/
+
+        // collection
+        if(readdata == 'R' || readdata == 'L' || readdata == '-' ||
+           (readdata >= '0' && readdata <='9')) {
+            if(num >= 10) { // bad
+                num = 0;
+                printf(EUSCI_A0_BASE,"over length\n\r");
+                clear();
+            } else { // good
+                str[num] = readdata;
+                num++;
+                //printf(EUSCI_A0_BASE, "srt = \"%s\"\n\r", str); //debug
+            }
+        }
+        if(readdata == '.') {
+            // start to parse
+            // MIN = "RXXXLYYY." MAX = "R-XXXL-YYY."
+            if(num != 0) {
+                printf(EUSCI_A0_BASE, "\n\rCOMMAND = \"%s\"\n\r", str);
+
+                if(num == 8) {
+                    // check sanity: "RXXXLYYY."
+                    if ((str[0] == 'R') &&
+                        (str[4] == 'L') &&
+                        (str[1] >= '0' && str[1] <= '9') &&
+                        (str[2] >= '0' && str[2] <= '9') &&
+                        (str[3] >= '0' && str[3] <= '9') &&
+                        (str[5] >= '0' && str[5] <= '9') &&
+                        (str[6] >= '0' && str[6] <= '9') &&
+                        (str[7] >= '0' && str[7] <= '9')) {
+                        DirectionFront();
+                        Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[1], 3));
+                        Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[5], 3));
+                        printf(EUSCI_A0_BASE, "***** Forward R %i L %i *****\r\n",
+                                               atoi(&str[1], 3), atoi(&str[5], 3));
+                    } else {
+                        printf(EUSCI_A0_BASE, "wrong command\n\r", str);
+                    }
+                }
+                else if(num == 10) {
+                    // check sanity: "R-XXXL-YYY."
+                    if ((str[0] == 'R') &&
+                        (str[1] == '-')&&(str[6] == '-') &&
+                        (str[5] == 'L') &&
+                        (str[2] >= '0' && str[2] <= '9') &&
+                        (str[3] >= '0' && str[3] <= '9') &&
+                        (str[4] >= '0' && str[4] <= '9') &&
+                        (str[7] >= '0' && str[7] <= '9') &&
+                        (str[8] >= '0' && str[8] <= '9') &&
+                        (str[9] >= '0' && str[9] <= '9')) {
+                        DirectionBack();
+                        Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[1], 3));
+                        Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[5], 3));
+                        printf(EUSCI_A0_BASE, "***** Backward R %i L %i *****\r\n",
+                                               atoi(&str[1], 3), atoi(&str[5], 3));
+                    } else {
+                        printf(EUSCI_A0_BASE, "wrong command\n\r", str);
+                    }
+                }
+                else
+                    printf(EUSCI_A0_BASE, "bad\n\r", str);
+                clear();
+            } else {
+                printf(EUSCI_A0_BASE, "\n\rclear\n\r");
+            }
         }
         //Additional commands here as needed
+
     }
 }
 
