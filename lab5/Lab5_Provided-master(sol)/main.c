@@ -9,8 +9,7 @@
 // 2^14 = 16384
 // adc 16383 = 3.3v (with divider) => 5v
 // adc 0 = 0v => 0v
-// (39*1000*(3.3/16384)) * (5/3.3) = 11.9 uA
-// (readdata*1000*(3.3/16384)) * (5/3.3) = uA
+// (readdata*1000*(3.3/16384)) * (5/3.3) = REAL mA
 // when no load, measured by multimeter = 0.016(0% duty) ~ 0.02(100% duty)
 
 #define LEFT TIMER_A_CAPTURECOMPARE_REGISTER_1
@@ -36,12 +35,29 @@ uint16_t atoi(volatile char* s, uint8_t l){
     return r;
 }
 void DirectionFront() {
-    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN2);
-    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN3);
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0);
+    GPIO_setOutputHighOnPin(GPIO_PORT_P4, GPIO_PIN1);
+
 }
 void DirectionBack() {
-    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN2);
-    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN3);
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN3);
+    GPIO_setOutputLowOnPin(GPIO_PORT_P4, GPIO_PIN1);
+}
+
+void DirectionLeft() {
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1); //f
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0); // f
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN2); // b
+    GPIO_setOutputHighOnPin(GPIO_PORT_P4, GPIO_PIN1); // b
+
+}
+void DirectionRight() {
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1); //back
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0); // back
+    GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN2); // forward
+    GPIO_setOutputLowOnPin(GPIO_PORT_P4, GPIO_PIN1); // forward
 }
 
 /* ADC-driving timer */
@@ -165,11 +181,12 @@ int main(void)
     ADC14_setResolution(ADC_14BIT);
 
     // ~~~~~ EDIT HERE ~~~~~~~ to read in A1 and A0 (our motor driver current report pins scaled to safe values) instead of A0
-    ADC14_configureSingleSampleMode(ADC_MEM0, true); //USES External voltage references!! VRef+ on P5.6, VRef- on P5.7 per http://bit.ly/432Function
-    ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
-
-    ADC14_configureSingleSampleMode(ADC_MEM1, true);
+    //ADC14_configureSingleSampleMode(ADC_MEM0 | ADC_MEM1, true); //USES External voltage references!! VRef+ on P5.6, VRef- on P5.7 per http://bit.ly/432Function
+    ADC14_configureMultiSequenceMode(ADC_MEM0, ADC_MEM1, true);
     ADC14_configureConversionMemory(ADC_MEM1, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A1, ADC_NONDIFFERENTIAL_INPUTS);
+
+    //ADC14_configureSingleSampleMode(ADC_MEM0, true);
+    ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
 
     MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P4,
         GPIO_PIN5 | GPIO_PIN6 | GPIO_PIN7, GPIO_TERTIARY_MODULE_FUNCTION); // per http://bit.ly/432Function
@@ -196,7 +213,9 @@ int main(void)
 
     // ~~~~~ EDIT HERE ~~~~~~~ add in the GPIO pins for telling the motor driver forward or back
     // TODO: OUTPUT PIN * 2
-    GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN1 + GPIO_PIN2 + GPIO_PIN3);
+    GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN1 + GPIO_PIN2);
+    GPIO_setAsOutputPin(GPIO_PORT_P4, GPIO_PIN1);
+
     DirectionFront();
 
     // SETUP UART
@@ -269,7 +288,6 @@ void handleLongCmd(char cmd, int16_t number){
 // UART Interrupt (receives commands)
 void EUSCIA0_IRQHandler(void)
 {
-    int i = 0;
     uint32_t status = MAP_UART_getEnabledInterruptStatus(EUSCI_A0_BASE);
 
     MAP_UART_clearInterruptFlag(EUSCI_A0_BASE, status);
@@ -278,7 +296,7 @@ void EUSCIA0_IRQHandler(void)
     {
         char readdata = EUSCI_A_SPI_receiveData(EUSCI_A0_BASE);
         //Always Echo back
-        printf(EUSCI_A0_BASE, "%c.", readdata);
+        printf(EUSCI_A0_BASE, "%c.", readdata); //debug
 
         //Handle & Accumulate numeric values; will call handleLongCmd(recentCmd,readValue) once command is complete
         if(readingNumber){
@@ -321,27 +339,6 @@ void EUSCIA0_IRQHandler(void)
         }
 
         // ~~~~~~~~~~ EDIT HERE ~~~~~~~~~~ to add L and R
-        /*
-        if( (readdata >= '0' && readdata <= '9') || readdata == 'f'){
-            if (readdata != 'f') {
-                SpeedVal = ((((readdata - '0')*10)*MAX_PWM_CNT)/100); // 0% to 90% duty cycle / Max counter value is 320
-            }
-            else if (readdata == 'f') {
-                SpeedVal = MAX_PWM_CNT;
-            }
-            Timer_A_setCompareValue(TIMER_A1_BASE, LeftRight, SpeedVal); //PWM
-            printf(EUSCI_A0_BASE, "Mode %s Speed %i% duty cycle\r\n",
-                                   LeftRight==LEFT?"Left":"Right", ((SpeedVal*100)/MAX_PWM_CNT));
-            //printf(EUSCI_A0_BASE, "%i\r\n", SpeedVal);
-        }
-        if(readdata == 'l') {
-            LeftRight = LEFT;
-            printf(EUSCI_A0_BASE,"Mode: Left\n\r");
-        }
-        else if(readdata == 'r') {
-            LeftRight = RIGHT;
-            printf(EUSCI_A0_BASE,"Mode: Right\n\r");
-        }*/
 
         // collection
         if(readdata == 'R' || readdata == 'L' || readdata == '-' ||
@@ -365,18 +362,17 @@ void EUSCIA0_IRQHandler(void)
                 if(num == 8) {
                     // check sanity: "RXXXLYYY."
                     if ((str[0] == 'R') &&
-                        (str[4] == 'L') &&
                         (str[1] >= '0' && str[1] <= '9') &&
                         (str[2] >= '0' && str[2] <= '9') &&
                         (str[3] >= '0' && str[3] <= '9') &&
                         (str[5] >= '0' && str[5] <= '9') &&
                         (str[6] >= '0' && str[6] <= '9') &&
                         (str[7] >= '0' && str[7] <= '9')) {
-                        DirectionFront();
-                        Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[1], 3));
-                        Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[5], 3));
-                        printf(EUSCI_A0_BASE, "***** Forward R %i L %i *****\r\n",
-                                               atoi(&str[1], 3), atoi(&str[5], 3));
+                            DirectionFront();
+                            Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[1], 3));
+                            Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[5], 3));
+                            printf(EUSCI_A0_BASE, "***** Forward R %i L %i *****\r\n",
+                                                   atoi(&str[1], 3), atoi(&str[5], 3));
                     } else {
                         printf(EUSCI_A0_BASE, "wrong command\n\r", str);
                     }
@@ -392,24 +388,54 @@ void EUSCIA0_IRQHandler(void)
                         (str[7] >= '0' && str[7] <= '9') &&
                         (str[8] >= '0' && str[8] <= '9') &&
                         (str[9] >= '0' && str[9] <= '9')) {
-                        DirectionBack();
-                        Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[1], 3));
-                        Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[5], 3));
-                        printf(EUSCI_A0_BASE, "***** Backward R %i L %i *****\r\n",
-                                               atoi(&str[1], 3), atoi(&str[5], 3));
+                            DirectionBack();
+                            Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[2], 3));
+                            Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[7], 3));
+                            printf(EUSCI_A0_BASE, "***** Backward R %i L %i *****\r\n",
+                                                   atoi(&str[2], 3), atoi(&str[7], 3));
                     } else {
                         printf(EUSCI_A0_BASE, "wrong command\n\r", str);
                     }
+                } else if(num == 9) { //BONUS points!!!!!!!!!!!!!!
+                    // check sanity: "RXXXL-YYY." or "R-XXXLYYY."
+                    if ((str[0] == 'R') &&
+                        (str[1] == '-') &&
+                        (str[2] >= '0' && str[2] <= '9') &&
+                        (str[3] >= '0' && str[3] <= '9') &&
+                        (str[4] >= '0' && str[4] <= '9') &&
+                        (str[5] == 'L') &&
+                        (str[6] >= '0' && str[6] <= '9') &&
+                        (str[7] >= '0' && str[7] <= '9') &&
+                        (str[8] >= '0' && str[8] <= '9')) {
+                            DirectionRight();
+                            Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[2], 3));
+                            Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[6], 3));
+                            printf(EUSCI_A0_BASE, "***** Turning Right R %i L %i *****\r\n",
+                                                   atoi(&str[2], 3), atoi(&str[6], 3));
+                    } else if ((str[0] == 'R') &&
+                            (str[1] >= '0' && str[1] <= '9') &&
+                            (str[2] >= '0' && str[2] <= '9') &&
+                            (str[3] >= '0' && str[3] <= '9') &&
+                            (str[4] == 'L') &&
+                            (str[5] == '-') &&
+                            (str[6] >= '0' && str[6] <= '9') &&
+                            (str[7] >= '0' && str[7] <= '9') &&
+                            (str[8] >= '0' && str[8] <= '9')) {
+                                DirectionLeft();
+                                Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, atoi(&str[1], 3));
+                                Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, atoi(&str[6], 3));
+                                printf(EUSCI_A0_BASE, "***** Turning Left R %i L %i *****\r\n",
+                                                       atoi(&str[1], 3), atoi(&str[6], 3));
+                    }
                 }
                 else
-                    printf(EUSCI_A0_BASE, "bad\n\r", str);
+                    printf(EUSCI_A0_BASE, "*****wrong command*****\n\r", str);
                 clear();
             } else {
                 printf(EUSCI_A0_BASE, "\n\rclear\n\r");
             }
         }
         //Additional commands here as needed
-
     }
 }
 
@@ -426,24 +452,23 @@ void ADC14_IRQHandler(void)
     if (status & ADC_INT0) { //A0 reading, on P5.5
         adcLeftVal = ADC14_getResult(ADC_MEM0); //debug
         SumLeft += (adcLeftVal*1000*5/16384);
-        //printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r");
+        //if(cnt>=100)
+            //printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r"); //debug
     }
     else if (status & ADC_INT1) {
         adcRightVal = ADC14_getResult(ADC_MEM1); //debug
         SumRight += (adcRightVal*1000*5/16384);
-        //printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r");
+        //if(cnt>=100)
+            //printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r"); //debug
     }
     cnt++;
     if(cnt>=100) {
-        cnt = 0;
-        //printf(EUSCI_A0_BASE, "Left %u (MEM0) Right %u (MEM1)\n\r",
-        //                       adcLeftVal, adcRightVal);  //This call is blocking!!
-
-        printf(EUSCI_A0_BASE, "Left %u uA (MEM0), Right %u uA(MEM1)\n\r",
+        printf(EUSCI_A0_BASE, "Left %u mA (MEM0), Right %u mA(MEM1)\n\r",
                                    SumLeft/100,
                                    SumRight/100);
-                               //(adcLeftVal*1000*5/16384),
-                               //(adcRightVal*1000*5/16384));
+                                   //(adcLeftVal*1000*5/16384),
+                                   //(adcRightVal*1000*5/16384));
+        cnt = 0;
         SumLeft=0;
         SumRight=0;
     }
