@@ -12,12 +12,21 @@
 // (readdata*1000*(3.3/16384)) * (5/3.3) = REAL mA
 // when no load, measured by multimeter = 0.016(0% duty) ~ 0.02(100% duty)
 
+// For pwm and parsing
 #define LEFT TIMER_A_CAPTURECOMPARE_REGISTER_1
 #define RIGHT TIMER_A_CAPTURECOMPARE_REGISTER_2
 volatile int16_t SpeedVal = 0;
 volatile uint_fast16_t LeftRight = LEFT;
 volatile char str[12]; // MIN = "RXXXLYYY." MAX = "R-XXXL-YYY."
 volatile int num = 0;
+
+// For encoder and rover direction
+volatile uint8_t EncodeSigA = 0xff, EncodeSigB = 0xff;
+volatile bool isNotClockwise = true, oldisNotClockwise = true;
+volatile bool islost = false;
+volatile int32_t counter = 0;
+enum StatName{AA, BB, CC, DD};
+volatile static enum StatName OldCurStat = AA, NewCurStat = AA;
 
 //volatile bool IsDirFront = trun;            // is direction front
 void clear(void) {
@@ -188,8 +197,8 @@ int main(void)
     //ADC14_configureSingleSampleMode(ADC_MEM0, true);
     ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
 
-    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P4,
-        GPIO_PIN5 | GPIO_PIN6 | GPIO_PIN7, GPIO_TERTIARY_MODULE_FUNCTION); // per http://bit.ly/432Function
+    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P5,
+        GPIO_PIN4 | GPIO_PIN5 | GPIO_PIN6 | GPIO_PIN7, GPIO_TERTIARY_MODULE_FUNCTION); // per http://bit.ly/432Function
 
     // ~~~~~ EDIT HERE ~~~~~~~ modify the interrupts on the ADC to actually trigger for A1 & A0
     MAP_ADC14_enableInterrupt(ADC_INT0 | ADC_INT1);
@@ -243,7 +252,25 @@ int main(void)
     GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
     Interrupt_enableInterrupt(INT_PORT1);
 
-//    Prepare debouncing using Timer A2
+    /*
+    Encoder for a motor
+    P4.4 - A
+    P4.5 - B
+    P4.6 - rising edge
+    P4.7 - falling edge
+    */
+    GPIO_setAsInputPinWithPullUpResistor(GPIO_PORT_P4, GPIO_PIN4 + GPIO_PIN5 +
+                                                         GPIO_PIN6 + GPIO_PIN7);
+    GPIO_clearInterruptFlag(GPIO_PORT_P4, GPIO_PIN4 + GPIO_PIN5 +
+                                            GPIO_PIN6 + GPIO_PIN7);
+
+    GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN6, GPIO_LOW_TO_HIGH_TRANSITION);
+    GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN7, GPIO_HIGH_TO_LOW_TRANSITION);
+
+    GPIO_enableInterrupt(GPIO_PORT_P4, GPIO_PIN6 + GPIO_PIN7);
+    Interrupt_enableInterrupt(INT_PORT4);
+
+    //Prepare debouncing using Timer A2
     ignoreButton = 0;
     Timer_A_configureUpMode(TIMER_A2_BASE, &debounceConfig);
     Timer_A_enableInterrupt(TIMER_A2_BASE);
@@ -254,6 +281,33 @@ int main(void)
     PMAP_configurePorts(portMapping, PMAP_P3MAP, 2, PMAP_DISABLE_RECONFIGURATION);
     GPIO_setAsPeripheralModuleFunctionOutputPin(GPIO_PORT_P3, GPIO_PIN6 | GPIO_PIN7,
             GPIO_PRIMARY_MODULE_FUNCTION); //outputs TA1.1 and TA1.2 outputs on pins 3.7 and 3.6 respectively.
+
+
+    //setup UART (bluetooth) BT - zigbee
+    /*
+    GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P3, // no need for clock pin, unlike USB
+        GPIO_PIN2 | GPIO_PIN3, GPIO_PRIMARY_MODULE_FUNCTION); // per http://bit.ly/432Function
+    UART_initModule(EUSCI_A2_BASE, &uartConfig);
+    UART_enableModule(EUSCI_A2_BASE);
+
+    UART_enableInterrupt(EUSCI_A2_BASE, EUSCI_A_UART_RECEIVE_INTERRUPT);
+    Interrupt_enableInterrupt(INT_EUSCIA2);
+     */
+
+    // state machine init
+    EncodeSigA = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN4);
+    EncodeSigB = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN5);
+    // state machine
+    // 01 11 10 00 01 11 10
+    // AA BB CC DD AA BB CC
+    if ((EncodeSigA == 0x00) && (EncodeSigB == 0x01))
+        OldCurStat = AA;
+    else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x01))
+        OldCurStat = BB;
+    else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x00))
+        OldCurStat = CC;
+    else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00))
+        OldCurStat = DD;
 
     /* Going to sleep z_z */
     while (1)
@@ -443,7 +497,7 @@ void EUSCIA0_IRQHandler(void)
 void ADC14_IRQHandler(void)
 {
     uint64_t status;
-    static uint64_t cnt = 0;
+    static uint64_t cntLeft = 0, cntRigh = 0;
     static uint16_t adcLeftVal = 0, adcRightVal = 0;
     static uint16_t SumLeft = 0, SumRight = 0;
     status = MAP_ADC14_getEnabledInterruptStatus();
@@ -452,23 +506,25 @@ void ADC14_IRQHandler(void)
     if (status & ADC_INT0) { //A0 reading, on P5.5
         adcLeftVal = ADC14_getResult(ADC_MEM0); //debug
         SumLeft += (adcLeftVal*1000*5/16384);
+        cntLeft++;
         //if(cnt>=100)
             //printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r"); //debug
     }
     else if (status & ADC_INT1) {
         adcRightVal = ADC14_getResult(ADC_MEM1); //debug
         SumRight += (adcRightVal*1000*5/16384);
+        cntRigh++;
         //if(cnt>=100)
             //printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r"); //debug
     }
-    cnt++;
-    if(cnt>=100) {
+    if(cntRigh>=100 || cntLeft>=100 ) {
         printf(EUSCI_A0_BASE, "Left %u mA (MEM0), Right %u mA(MEM1)\n\r",
-                                   SumLeft/100,
-                                   SumRight/100);
+                                   SumLeft/cntLeft,
+                                   SumRight/cntRigh);
                                    //(adcLeftVal*1000*5/16384),
                                    //(adcRightVal*1000*5/16384));
-        cnt = 0;
+        cntLeft = 0;
+        cntRigh = 0;
         SumLeft=0;
         SumRight=0;
     }
@@ -477,6 +533,7 @@ void ADC14_IRQHandler(void)
 void PORT1_IRQHandler(void){ //Port 1 interrupt
     uint64_t status = GPIO_getEnabledInterruptStatus(GPIO_PORT_P1);
     GPIO_clearInterruptFlag(GPIO_PORT_P1, status);
+    //GPIO_disableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
 
     if(status & GPIO_PIN4 & ~ignoreButton){ //button 1.4
         ignoreButton = true;
@@ -485,6 +542,112 @@ void PORT1_IRQHandler(void){ //Port 1 interrupt
         toggleSamplingState();
     }
 
+    //GPIO_enableInterrupt(GPIO_PORT_P1, GPIO_PIN4);
+}
+
+void PORT4_IRQHandler(void){ //Port 4 interrupt
+    static int cnt = 0;
+    uint64_t status = GPIO_getEnabledInterruptStatus(GPIO_PORT_P4);
+    GPIO_clearInterruptFlag(GPIO_PORT_P4, status);
+    if((status & GPIO_PIN6) || (status & GPIO_PIN7)) {
+        EncodeSigA = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN4);
+        EncodeSigB = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN5);
+        // state machine
+        // 01 11 10 00 01 11 10
+        // AA BB CC DD AA BB CC
+        // Forward <--==Rover==---> backward
+        switch (OldCurStat) {
+            case DD:
+                if ((EncodeSigA == 0x00) && (EncodeSigB == 0x01)) {
+                    NewCurStat = AA; counter--;
+                    isNotClockwise = true; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x00)) {
+                    NewCurStat = CC; counter++;
+                    isNotClockwise = false; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else {
+                    islost = true;
+                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                }
+                break;
+            case AA:
+                // 01 11 10 00 01 11 10
+                // AA BB CC DD AA BB CC
+                // Forward <--==Rover==---> backward
+                if ((EncodeSigA == 0x01) && (EncodeSigB == 0x01)) {
+                    NewCurStat = BB; counter--;
+                    isNotClockwise = true; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00)) {
+                    NewCurStat = DD; counter++;
+                    isNotClockwise = false; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else {
+                    islost = true;
+                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                }
+                break;
+            case BB:
+                // 01 11 10 00 01 11 10
+                // AA BB CC DD AA BB CC
+                // Forward <--==Rover==---> backward
+                if ((EncodeSigA == 0x01) && EncodeSigB == 0x00) {
+                    NewCurStat = CC; counter--;
+                    isNotClockwise = true; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x01)) {
+                    NewCurStat = AA; counter++;
+                    isNotClockwise = false; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else {
+                    islost = true;
+                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                }
+                break;
+            case CC:
+                // 01 11 10 00 01 11 10
+                // AA BB CC DD AA BB CC
+                // Forward <--==Rover==---> backward
+                if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00)) {
+                    NewCurStat = DD; counter--;
+                    isNotClockwise = true; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x01)) {
+                    NewCurStat = BB; counter++;
+                    isNotClockwise = false; islost = false;
+                    if (isNotClockwise != oldisNotClockwise)
+                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                } else {
+                    islost = true;
+                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                }
+                break;
+        }
+
+        if ((isNotClockwise != oldisNotClockwise) || islost) {
+            cnt = 0;
+        }
+        else {
+            cnt++;
+            if(cnt >= 333) {
+                cnt = 0;
+                printf(EUSCI_A0_BASE, "***isForwarding (%s) counter %l***\n\r",
+                                       isNotClockwise?"NOT":"YES", counter);
+            }
+        }
+        OldCurStat = NewCurStat;
+        oldisNotClockwise = isNotClockwise;
+        //printf(EUSCI_A0_BASE, "A %x (4.6), B %x (4.7) (hex)\n\r",
+        //                          EncodeSigA, EncodeSigB); //debug
+    }
 }
 
 void TA2_0_IRQHandler(void){ //debounce timer interrupt
@@ -496,3 +659,23 @@ void TA2_0_IRQHandler(void){ //debounce timer interrupt
     Timer_A_stopTimer(TIMER_A2_BASE);
     ignoreButton = false;
 }
+
+/* BT - zigbee
+void EUSCIA2_IRQHandler(void)
+{
+    uint32_t status = MAP_UART_getEnabledInterruptStatus(EUSCI_A2_BASE);
+
+    MAP_UART_clearInterruptFlag(EUSCI_A2_BASE, status);
+
+    if(status & EUSCI_A_UART_RECEIVE_INTERRUPT_FLAG)
+    {
+        char readdata = UART_receiveData(EUSCI_A2_BASE);
+
+        printf(EUSCI_A0_BASE, "%c.", readdata);
+
+        // toggle LED1.0 w/ every incoming character on bluetooth
+        GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0);
+    }
+
+}
+*/
