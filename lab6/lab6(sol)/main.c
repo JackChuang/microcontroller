@@ -4,6 +4,7 @@
 /* Standard Includes */
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #include "printf.h"
 
 // 2^14 = 16384
@@ -13,17 +14,32 @@
 // when no load, measured by multimeter = 0.016(0% duty) ~ 0.02(100% duty)
 
 
+//pid
+static int32_t e_prev = 0;
+static int32_t integral_prev = 0;
+
 // lab6
-volatile uint8_t lcm = 0;
+// TODO: if we don't recognize 0 ~ 15cm distance, the system will think we are at 15 ~ 30 cm?
+volatile int32_t lcm = 0;
 volatile uint16_t gpwm = 0; // 0% ~ 100%
-volatile bool isSysStart = false;
-float kp = 1;
-float ki = 1;
-float kd = 1;
+volatile static bool isSysStart = false;
+//volatile static bool isSysStart;
+// 100 is the base => 1.0
+int32_t kp = 1;
+int32_t ki = 1;
+int32_t kd = 10000;
+
+#define MAX_ADC_SLOT 10
+volatile uint32_t ADCarry[MAX_ADC_SLOT];
+volatile uint32_t adcDistVal = 0;
+volatile uint8_t ADCslot = 0;
 
 // For pwm and parsing
 #define LEFT TIMER_A_CAPTURECOMPARE_REGISTER_1
 #define RIGHT TIMER_A_CAPTURECOMPARE_REGISTER_2
+#define CCR3 TIMER_A_CAPTURECOMPARE_REGISTER_3
+#define CCR4 TIMER_A_CAPTURECOMPARE_REGISTER_4
+
 volatile int16_t SpeedVal = 0;
 volatile uint_fast16_t LeftRight = LEFT;
 volatile char str[12]; // MIN = "RXXXLYYY." MAX = "R-XXXL-YYY."
@@ -37,6 +53,65 @@ volatile bool islost = false;
 volatile int32_t counter = 0;
 enum StatName{AA, BB, CC, DD};
 volatile static enum StatName OldCurStat = AA, NewCurStat = AA;
+
+// infrared sensor reading data
+#define MAX_ITEMS 8
+float ADCdata[MAX_ITEMS] = {14300, 13900, 12650, 9700,
+                            6500, 4825, 3900, 2900};
+float Dist[MAX_ITEMS] = {13, 15, 20, 30, 45, 60, 75, 100};
+
+uint32_t ADCtoDIST(float input) {
+  /*cm   data
+    13 14300    0
+    15 13900    1
+    20 12650    2
+    30 9700     3
+    45 6500     4
+    60 4825     5
+    75 3900     6
+    100 2900    7   */
+    bool good = false;
+    float ret;
+    int i;
+
+    if(input> ADCdata[0] || input < ADCdata[MAX_ITEMS-1]) {
+        printf(EUSCI_A0_BASE, "out range\n\r");
+        printf(EUSCI_A0_BASE, "[0] %n | [MAX-1] %n\n\r",
+                               ADCdata[0], ADCdata[MAX_ITEMS-1]);
+        return 0;
+    }
+    for (i = 0; i < MAX_ITEMS - 2 ; i++) {
+        if (input <= ADCdata[i] && input >= ADCdata[i+1] ) {
+            /* floating point version
+           float range = ADCdata[i] - ADCdata[i+1];
+           float offset = input - ADCdata[i+1];
+           //float base = ADCdata[i+1];
+           float dist_range = Dist[i+1] - Dist[i];
+           float dist_base = Dist[i];
+           ret = ((offset / range) * dist_range) + dist_base;
+           good = true;
+           printf(EUSCI_A0_BASE, "[%i] (%n/1000)/range(%n) | * %n | + %n\n\r", i,
+                              (offset *1000 / range), (uint32_t)dist_range, dist_base);
+           */
+           uint32_t range = ADCdata[i] - ADCdata[i+1];
+           uint32_t offset = input - ADCdata[i+1];
+           //float base = ADCdata[i+1];
+           uint32_t dist_range = Dist[i+1] - Dist[i];
+           uint32_t dist_base = Dist[i];
+           ret = (((offset*1000) / range) * (dist_range)) + (dist_base*1000);
+           good = true;
+           printf(EUSCI_A0_BASE, "[%i] (%n/1000)/range(%n) | * %n | + %n*1000\n\r", i,
+                                  (offset*1000), range, dist_range, dist_base);
+           ret = ret/1000;
+           printf(EUSCI_A0_BASE, "[%i] ret %n\n\r", i, ret);
+        }
+    }
+    if (!good) {
+        printf(EUSCI_A0_BASE, "out range - impossible to be here\n\r");
+        return -1;
+    }
+    return ret;
+}
 
 
 //volatile bool IsDirFront = trun;            // is direction front
@@ -56,20 +131,33 @@ uint16_t atoi(volatile char* s, uint8_t l){
 }
 
 /* duty = 0 ~ 100%*/
-void rover_speed_duty(uint32_t duty) {
-    Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, duty);
-    Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, duty);
+void rover_speed_duty(uint16_t duty, bool force) {
+    static int cnn = 0;
+    cnn++;
+    if(cnn >= 20 || force) {
+        printf(EUSCI_A0_BASE, "OUTPUT\r\n");
+        Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, duty*10);
+        Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, duty*10);
+        //Timer_A_setCompareValue(TIMER_A1_BASE, CCR3, duty*10);
+        //Timer_A_setCompareValue(TIMER_A1_BASE, CCR4, duty*10);
+        cnn = 0;
+    }
 }
 
 void DirectionFront() {
+    //GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
+    //GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0);
+    //GPIO_setOutputHighOnPin(GPIO_PORT_P4, GPIO_PIN1);
+    GPIO_setOutputHighOnPin(GPIO_PORT_P4, GPIO_PIN1);
     GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
     GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN0);
-    GPIO_setOutputHighOnPin(GPIO_PORT_P4, GPIO_PIN1);
-
 }
 void DirectionBack() {
+    //GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
+    //GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN3);
+    //GPIO_setOutputLowOnPin(GPIO_PORT_P4, GPIO_PIN1);
     GPIO_setOutputHighOnPin(GPIO_PORT_P5, GPIO_PIN1 + GPIO_PIN2);
-    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN3);
+    GPIO_setOutputLowOnPin(GPIO_PORT_P5, GPIO_PIN0 );
     GPIO_setOutputLowOnPin(GPIO_PORT_P4, GPIO_PIN1);
 }
 
@@ -148,7 +236,23 @@ Timer_A_CompareModeConfig ccr2Config =
     0
 };
 
-
+//debug p3.2, p3.3
+/*
+Timer_A_CompareModeConfig ccr3Config =
+{
+    TIMER_A_CAPTURECOMPARE_REGISTER_3,
+    TIMER_A_CAPTURECOMPARE_INTERRUPT_DISABLE,
+    TIMER_A_OUTPUTMODE_TOGGLE_SET,
+    0
+};
+Timer_A_CompareModeConfig ccr4Config =
+{
+    TIMER_A_CAPTURECOMPARE_REGISTER_4,
+    TIMER_A_CAPTURECOMPARE_INTERRUPT_DISABLE,
+    TIMER_A_OUTPUTMODE_TOGGLE_SET,
+    0
+};
+*/
 // UART over USB config
 const eUSCI_UART_Config uartConfig = // USING 3Mhz Master Clock, baud rate 115200 (values from the calculator at http://bit.ly/432UART)
 {
@@ -166,12 +270,11 @@ const eUSCI_UART_Config uartConfig = // USING 3Mhz Master Clock, baud rate 11520
 const uint8_t portMapping[] =
 
 { //Port 3 remap
+        //PMAP_NONE,  PMAP_NONE,  PMAP_TA1CCR3A,
+        //PMAP_TA1CCR4A,      PMAP_NONE,      PMAP_NONE,
         PMAP_NONE,  PMAP_NONE,  PMAP_NONE,
-
         PMAP_NONE,      PMAP_NONE,      PMAP_NONE,
-
         PMAP_TA1CCR1A,      PMAP_TA1CCR2A
-
 };
 
 
@@ -189,6 +292,7 @@ static volatile bool negative;
 
 int main(void)
 {
+    uint32_t i;
     /* Halting WDT  */
     MAP_WDT_A_holdTimer();
     MAP_Interrupt_enableSleepOnIsrExit();
@@ -213,14 +317,14 @@ int main(void)
     // P4.3    GPIO        N/A     MCLK        N/A     RTCCLK      A10
     //http://bit.ly/432Function
     ADC14_configureSingleSampleMode(ADC_MEM0, true);
-    //ADC14_configureSingleSampleMode(ADC_MEM0 | ADC_MEM1, true); //USES External voltage references!! VRef+ on P5.6, VRef- on P5.7 per
+    ADC14_configureSingleSampleMode(ADC_MEM0 | ADC_MEM1, true); //USES External voltage references!! VRef+ on P5.6, VRef- on P5.7 per
     /*
     ADC14_configureMultiSequenceMode(ADC_MEM0, ADC_MEM2, true);
     ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
     ADC14_configureConversionMemory(ADC_MEM1, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A1, ADC_NONDIFFERENTIAL_INPUTS);
-    ADC14_configureConversionMemory(ADC_MEM2, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A13, ADC_NONDIFFERENTIAL_INPUTS);
-*/
-    ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
+    */
+    //ADC14_configureConversionMemory(ADC_MEM2, ADC_VREFPOS_EXTPOS_VREFNEG_EXTNEG, ADC_INPUT_A13, ADC_NONDIFFERENTIAL_INPUTS);
+    //ADC14_configureConversionMemory(ADC_MEM0, ADC_VREFPOS_AVCC_VREFNEG_VSS, ADC_INPUT_A0, ADC_NONDIFFERENTIAL_INPUTS);
 
     //ADC14_configureConversionMemory(ADC_MEM2, ADC_VREFPOS_EXTPOS_VREFNEG_EXTNEG, ADC_INPUT_A13, ADC_NONDIFFERENTIAL_INPUTS);
 
@@ -231,18 +335,25 @@ int main(void)
 
     // ADC PIN !!!!!!!!!! P4.0
     // per http://bit.ly/432Function
+    /*
     MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P5,
         GPIO_PIN4 | GPIO_PIN5 | GPIO_PIN6 | GPIO_PIN7, GPIO_TERTIARY_MODULE_FUNCTION);
-    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P4, GPIO_PIN0 ,
+        */
+    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P5,    //adc ref+, -
+                                                   GPIO_PIN6 | GPIO_PIN7, GPIO_TERTIARY_MODULE_FUNCTION);
+    MAP_GPIO_setAsPeripheralModuleFunctionInputPin(GPIO_PORT_P5, GPIO_PIN5 ,    //MEM0 A0
                                                    GPIO_TERTIARY_MODULE_FUNCTION);
 
     // ADC INT
     // ~~~~~ EDIT HERE ~~~~~~~ modify the interrupts on the ADC to actually trigger for A1 & A0 <- THIS IS NOT TRUE
-    MAP_ADC14_enableInterrupt(ADC_INT0 | ADC_INT1 | ADC_INT2); //MEMx
+    //MAP_ADC14_enableInterrupt(ADC_INT0 | ADC_INT1 | ADC_INT2); //MEMx
+    MAP_ADC14_enableInterrupt(ADC_INT0); //MEMx
     MAP_Interrupt_enableInterrupt(INT_ADC14);
     MAP_Interrupt_enableMaster();
 
-    sampling = 0; // Only start sampling at 100Hz when activated by UART command or P1.4 button press
+    sampling = 1; // Only start sampling at 100Hz when activated by UART command or P1.4 button press
+    ADC14_enableConversion();
+    GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0);
 
     /* (old) Starting Timer_A0 in up mode and sourced from ACLK (32khz), sampling every 0.5s */
     /* (new) Starting Timer_A0 in up mode and sourced from ACLK (32khz), sampling every 10ms or 100Hz */
@@ -255,13 +366,15 @@ int main(void)
     //PWM
     Timer_A_initCompare(TIMER_A1_BASE, &ccr1Config);        //Left
     Timer_A_initCompare(TIMER_A1_BASE, &ccr2Config);        //Right
+    //Timer_A_initCompare(TIMER_A1_BASE, &ccr3Config);        // P3.2
+    //Timer_A_initCompare(TIMER_A1_BASE, &ccr4Config);        // P3.3
     Timer_A_configureUpMode(TIMER_A1_BASE, &pwm_Config);    //PWM upper bond
     Timer_A_startCounter(TIMER_A1_BASE, TIMER_A_UP_MODE);   //
 
     // ~~~~~ EDIT HERE ~~~~~~~ add in the GPIO pins for telling the motor driver forward or back
     // TODO: OUTPUT PIN * 2
     GPIO_setAsOutputPin(GPIO_PORT_P5, GPIO_PIN0 + GPIO_PIN1 + GPIO_PIN2);
-    GPIO_setAsOutputPin(GPIO_PORT_P4, GPIO_PIN1);
+    GPIO_setAsOutputPin(GPIO_PORT_P4, GPIO_PIN1); // p4.1
 
     DirectionFront();
 
@@ -297,15 +410,24 @@ int main(void)
     P4.6 - rising edge
     P4.7 - falling edge
     */
+
     GPIO_setAsInputPinWithPullUpResistor(GPIO_PORT_P4, GPIO_PIN4 + GPIO_PIN5 +
                                                          GPIO_PIN6 + GPIO_PIN7);
     GPIO_clearInterruptFlag(GPIO_PORT_P4, GPIO_PIN4 + GPIO_PIN5 +
                                             GPIO_PIN6 + GPIO_PIN7);
+    //GPIO_clearInterruptFlag(GPIO_PORT_P4, GPIO_PIN6 + GPIO_PIN7);
 
+    // 4 wires
+    GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN4, GPIO_HIGH_TO_LOW_TRANSITION);
+    GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN5, GPIO_LOW_TO_HIGH_TRANSITION);
     GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN6, GPIO_LOW_TO_HIGH_TRANSITION);
     GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN7, GPIO_HIGH_TO_LOW_TRANSITION);
+    //GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN6, GPIO_LOW_TO_HIGH_TRANSITION);
+    //GPIO_interruptEdgeSelect(GPIO_PORT_P4, GPIO_PIN7, GPIO_HIGH_TO_LOW_TRANSITION);
 
-    GPIO_enableInterrupt(GPIO_PORT_P4, GPIO_PIN6 + GPIO_PIN7);
+    //GPIO_enableInterrupt(GPIO_PORT_P4, GPIO_PIN6 + GPIO_PIN7);
+    GPIO_enableInterrupt(GPIO_PORT_P4, GPIO_PIN4 + GPIO_PIN5 +
+                                       GPIO_PIN6 + GPIO_PIN7);
     Interrupt_enableInterrupt(INT_PORT4);
 
     //Prepare debouncing using Timer A2
@@ -319,7 +441,6 @@ int main(void)
     PMAP_configurePorts(portMapping, PMAP_P3MAP, 2, PMAP_DISABLE_RECONFIGURATION);
     GPIO_setAsPeripheralModuleFunctionOutputPin(GPIO_PORT_P3, GPIO_PIN6 | GPIO_PIN7,
             GPIO_PRIMARY_MODULE_FUNCTION); //outputs TA1.1 and TA1.2 outputs on pins 3.7 and 3.6 respectively.
-
 
     //setup UART (bluetooth) BT - zigbee
     /*
@@ -347,54 +468,13 @@ int main(void)
     else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00))
         OldCurStat = DD;
 
+    for (i = 0; i < MAX_ADC_SLOT ; i++)
+        ADCarry[i] = 0;
+
     while (1)
     {
         /* Going to sleep z_z */
         //MAP_PCM_gotoLPM0InterruptSafe();
-
-        //printf(EUSCI_A0_BASE,"GO (dist) (L%u cm)\n\r", lcm);
-        //printf(EUSCI_A0_BASE, "(%u distADC(MEM2), %i encoderL, %u% pwmL)\n\r",
-        //                                      adcDistVal, counter, gpwm/10);
-        if(isSysStart){
-            //control
-/*
-            // curren
-            // adcDistVal -> curlcm
-            float curlcm = adcDistVal;
-            static float lastInput;
-            // target
-            //lcm
-
-            //errcm = curlcm - lcm;
-
-            //gpwm = x;
-            rover_speed_duty(gpwm);
-
-            //Compute all the working error variables/
-            // lcm = target
-            float error = lcm - curlcm;  //curlcm: input, +:forward, -:backward
-            float ITerm = lastOutput
-            ITerm += (ki * error);
-            // ITerm =
-            // ITerm = lastOutput;
-outMax = 100;
-outMin = 0;
-            if(ITerm > outMax) ITerm = outMax;
-            else if(ITerm < outMin) ITerm= outMin;
-            float dInput = (curlcm - lastInput);
-
-            //Compute PID Output
-            float output = kp * error + ITerm - kd * dInput;
-
-            if(output > outMax) output = outMax;
-            else if(output < outMin) output = outMin;
-            *myOutput = output;
-
-            //Remember some variables for next time
-            lastInput = input;
-            lastOutput =
-*/
-        }
     }
 }
 
@@ -426,7 +506,6 @@ void EUSCIA0_IRQHandler(void)
 {
     static bool isWaitNum = false, isFirstNum = false;
     uint32_t status = MAP_UART_getEnabledInterruptStatus(EUSCI_A0_BASE);
-
     MAP_UART_clearInterruptFlag(EUSCI_A0_BASE, status);
 
     if(status & EUSCI_A_UART_RECEIVE_INTERRUPT_FLAG)
@@ -436,6 +515,7 @@ void EUSCIA0_IRQHandler(void)
         printf(EUSCI_A0_BASE, "%c.", readdata); //debug
 
         //Handle & Accumulate numeric values; will call handleLongCmd(recentCmd,readValue) once command is complete
+        /*
         if(readingNumber){
             if(readdata < '0' || readdata > '9'){ //new non-numeric character!!
                 if(readdata=='-' && readValue==0){ //first character is minus sign means value should be negative, keep reading number
@@ -450,17 +530,20 @@ void EUSCIA0_IRQHandler(void)
                 readValue = 10*readValue + (negative ? -1 : 1) * (readdata - '0');
             }
         }
+        */
 
         //change recent command if input is not a number
+        /*
         if(readdata != '-' && (readdata < '0' || readdata > '9')){
             recentCmd = readdata;
         }
+        */
 
         //command character logic:
         if(readdata == 's' || readdata == 'S'){ //Toggle sampling mode
             toggleSamplingState();
         }
-        if(readdata == '?'){ //Help message
+        else if(readdata == '?'){ //Help message
             printf(EUSCI_A0_BASE,"\n\rCommand:\tEffect:\n\r");
             printf(EUSCI_A0_BASE,"?\tPrint this help message\n\r"); //?
             printf(EUSCI_A0_BASE,"s\tToggle Sampling Behavior\n\r"); //s
@@ -470,12 +553,39 @@ void EUSCIA0_IRQHandler(void)
             printf(EUSCI_A0_BASE,"r: control focus on Right only\n\r");
             printf(EUSCI_A0_BASE,"0~9: corresponding to 0% ~ 90% dutycycles\n\r");
         }
-        if(readdata == 'd'){ //double cmd
+        /*
+        else if(readdata == 'd'){ //double cmd
             readingNumber = true; //tells us this a long command, begins accumulating number
             // rest of logic is in handleLongCmd, called when next nonnumeric character is received.
-        }
+        }*/
 
         // ~~~~~~~~~~ EDIT HERE ~~~~~~~~~~ to add L and R
+
+        // lab5 testing code
+        /*
+        if( (readdata >= '0' && readdata <= '9') || readdata == 'f'){
+            if (readdata != 'f') {
+                SpeedVal = ((((readdata - '0')*10)*MAX_PWM_CNT)/100); // 0% to 90% duty cycle / Max counter value is 320
+            }
+            else if (readdata == 'f') {
+                SpeedVal = MAX_PWM_CNT;
+            }
+            //Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, SpeedVal); //PWM
+            //Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, SpeedVal); //PWM
+            rover_speed_duty(SpeedVal/10, true);
+            printf(EUSCI_A0_BASE, "Mode %s Speed %i% duty cycle\r\n",
+                                   LeftRight==LEFT?"Left":"Right", ((SpeedVal*100)/MAX_PWM_CNT));
+            //printf(EUSCI_A0_BASE, "%i\r\n", SpeedVal);
+        }
+        if(readdata == 'a') {
+            DirectionFront();
+            printf(EUSCI_A0_BASE,"Mode: Front\n\r");
+        }
+        else if(readdata == 'b') {
+            DirectionBack();
+            printf(EUSCI_A0_BASE,"Mode: Back\n\r");
+        }
+         */
         /* lab6
          * L##
          * G
@@ -484,34 +594,36 @@ void EUSCIA0_IRQHandler(void)
          * (distADC, encoderL, pwmL)
          *
          */
-        if(readdata == 'L' || readdata == 'l') {
-            printf(EUSCI_A0_BASE, "COMMAND \"L\"\n\r"); //debug
+        else if(readdata == 'L' || readdata == 'l') {
+            //printf(EUSCI_A0_BASE, "COMMAND \"L\"\n\r"); //debug
             isWaitNum = true;
         } else if (readdata > '0' && readdata < '9') {
-            printf(EUSCI_A0_BASE, "COMMAND \"0~9\"\n\r"); //debug
+            //printf(EUSCI_A0_BASE, "COMMAND \"0~9\"\n\r"); //debug
             if (isWaitNum) {
                 if (isFirstNum) {
                     strlcm[1] = readdata;
                     lcm = atoi(&strlcm[0], 2);
-                    printf(EUSCI_A0_BASE,"L%u cm \n\r", lcm);
+                    printf(EUSCI_A0_BASE,"*** L%i cm ***\n\r", lcm);
                     isWaitNum = false;
                     isFirstNum = false;
                } else {
+                   isFirstNum = true;
                    strlcm[0] = readdata;
                }
             }
         } else if(readdata == 'G' || readdata == 'g') {
-            printf(EUSCI_A0_BASE, "COMMAND \"G\" L%u cm \n\r", lcm); //debug
-            if(lcm > 0)
+            if(lcm > 0) {
                 isSysStart = true;
+                printf(EUSCI_A0_BASE, "*** COMMAND \"G\" L%u cm ***\n\r", lcm);
+            }
         } else if(readdata == 'K' || readdata == 'k') {
             printf(EUSCI_A0_BASE, "COMMAND \"K\"\n\r"); //debug
             isSysStart = false;
             gpwm = 10;
-            rover_speed_duty(0);
+            rover_speed_duty(0, true);
         }
 
-        if((readdata != 'L' || readdata != 'l') && !(isWaitNum && (readdata < '0' || readdata > '9'))) {
+        if((readdata != 'L' || readdata != 'l') && !(isWaitNum && (readdata > '0' || readdata < '9'))) {
             isWaitNum = false;
         }
 
@@ -619,23 +731,23 @@ void EUSCIA0_IRQHandler(void)
 /* This interrupt is fired whenever a conversion is completed and placed in ADC_MEM0 */
 void ADC14_IRQHandler(void)
 {
-    uint32_t status;
+    static uint16_t cntDist = 0;
+    uint32_t status, i;
     static uint32_t cntLeft = 0, cntRigh = 0, cntADC = 0;
-    static uint16_t adcLeftVal = 0, adcRightVal = 0;
+    //static uint16_t adcLeftVal = 0, adcRightVal = 0;
     static uint16_t SumLeft = 0, SumRight = 0;
     static uint32_t SumADCDistVal = 0;
-    static uint16_t adcDistVal = 0;
     status = MAP_ADC14_getEnabledInterruptStatus();
     MAP_ADC14_clearInterruptFlag(status);
     // printf(EUSCI_A0_BASE, "ADC status %x\n\r", status);  // debug
-
+    /*
     if (status & ADC_INT0) { //A0 reading, on P5.5
         adcLeftVal = ADC14_getResult(ADC_MEM0); //debug
         SumLeft += (adcLeftVal*1000*5/16384);
         cntLeft++;
         //if(cnt>=100)
             //printf(EUSCI_A0_BASE, "got ADC_MEM0\n\r"); //debug
-        printf(EUSCI_A0_BASE, "peeking ADC(MEM0) %n %n(sum)\n\r", ADC14_getResult(ADC_MEM0), SumLeft);  // debug
+        //printf(EUSCI_A0_BASE, "peeking ADC(MEM0) %n %n(sum)\n\r", ADC14_getResult(ADC_MEM0), SumLeft);  // debug
     }
     else if (status & ADC_INT1) {
         adcRightVal = ADC14_getResult(ADC_MEM1); //debug
@@ -645,24 +757,49 @@ void ADC14_IRQHandler(void)
             //printf(EUSCI_A0_BASE, "got ADC_MEM1\n\r"); //debug
     }
     else if (status & ADC_INT2) //A13/MEM2 reading, on P4.0
+    */
+    if (status & ADC_INT0) //A13/MEM2 reading, on P4.0
     {
-        SumADCDistVal += ADC14_getResult(ADC_MEM2);
+        uint32_t tmpadc = ADC14_getResult(ADC_MEM0);
+        SumADCDistVal += tmpadc;
         cntADC++;
+        if(ADCslot == MAX_ADC_SLOT)
+            ADCslot = 0;
+        ADCarry[ADCslot] = tmpadc;
+        ADCslot++;
         //if (cntADC > 10)
-            printf(EUSCI_A0_BASE, "peeking ADC(MEM2) %n %n(sum)\n\r", ADC14_getResult(ADC_MEM2), SumADCDistVal);  // debug
+            //printf(EUSCI_A0_BASE, "peeking ADC(MEM2) %n %n(sum)\n\r", ADC14_getResult(ADC_MEM2), SumADCDistVal);  // debug
+        /* peeking
+        uint32_t tmpadcsum = 0;
+        uint8_t i;
+        for (i = 0; i < MAX_ADC_SLOT ; i++)
+            tmpadcsum += ADCarry[i];
+        tmpadcsum /= MAX_ADC_SLOT;
+        printf(EUSCI_A0_BASE, "(%n distADC(MEM2)\n\r", tmpadcsum);
+        */
     }
-    if(cntRigh >= 100 || cntLeft >= 100 || cntADC >= 10 ) {
+    if(cntRigh >= 100 || cntLeft >= 100 || cntADC >= 30 ) {
         if (cntLeft > 0 && cntRigh > 0)
             printf(EUSCI_A0_BASE, "Left %u mA (MEM0), Right %u mA(MEM1)\n\r",
                                        SumLeft/cntLeft,
                                        SumRight/cntRigh);
         if (cntADC > 0) {
-            adcDistVal = SumADCDistVal/cntADC;
-            printf(EUSCI_A0_BASE, "(%n / %u)\n\r", SumADCDistVal, cntADC);   // debug
-        }
-        printf(EUSCI_A0_BASE, "(%u distADC(MEM2) | %i encoderL | %u% pwmL)\n\r",
-                                       adcDistVal, counter, gpwm);
+            // 1
+            uint32_t tmpadcsum = 0;
+            uint8_t i;
+            for (i = 0; i < MAX_ADC_SLOT ; i++)
+                tmpadcsum += ADCarry[i];
+            tmpadcsum /= MAX_ADC_SLOT;
+            // 2 not using
+            //adcDistVal = SumADCDistVal/cntADC;
+            //printf(EUSCI_A0_BASE, "(%n / %u)\n\r", SumADCDistVal, cntADC);   // debug
 
+            adcDistVal = tmpadcsum;
+        }
+        //printf(EUSCI_A0_BASE, "(%n distADC(MEM0) | %i encoderL | %u% pwmL) | %n DIST\n\r",
+        //                               adcDistVal, counter, gpwm, ADCtoDIST(adcDistVal));
+        //printf(EUSCI_A0_BASE, "(%n distADC(MEM0) | %i encoderL | %u% pwmL)\n\r",
+        //                                       adcDistVal, counter, gpwm);
 
         cntLeft = 0;
         cntRigh = 0;
@@ -670,6 +807,137 @@ void ADC14_IRQHandler(void)
         SumADCDistVal = 0;
         SumLeft=0;
         SumRight=0;
+    }
+
+
+    if(isSysStart) {
+        cntDist++;  // dbg
+
+        // - get a smooth ADC data - //
+        uint32_t tmpadcsum = 0;
+        for (i = 0; i < MAX_ADC_SLOT ; i++)
+            tmpadcsum += ADCarry[i];
+        adcDistVal = tmpadcsum/MAX_ADC_SLOT;
+
+        // - PID control parameters - //
+        //float dt = 0.001;
+        int32_t dt = 1; // 1000
+
+        //float curlcm = ADCtoDIST(adcDistVal); // my distance conversion
+        float voltage = (adcDistVal * 3.3) / 16384;
+        float distance = 65 * pow(voltage, -1.10);
+
+        int32_t curlcm = distance *1000; // from cm to cm/1000
+        int32_t target_lcm = lcm *1000; // from cm to cm/1000
+        int32_t e = curlcm - target_lcm;   //error in distance
+if (e <= 1000 && e >= 1000)
+    e=0;
+        // PID-controller:
+        int32_t e_derivative = ((e - e_prev)/dt);
+        int32_t integral = (integral_prev + (e * dt));
+        //int32_t PID_term = (kp * e)  +  (kd * e_derivative);//  +  (ki * integral);
+        //int32_t PID_term = (kp * e)  +  (kd * e_derivative)  +  (ki * integral);
+        int32_t PID_term = (kp * e);
+        PID_term = PID_term / (((dt*100)*10)/1); // from cm/1000 to cm // kp,ki,kd base
+        if(cntDist > 20) {;
+            printf(EUSCI_A0_BASE,"kd curlcm %l - target_lcm %l = %l | e_d %l i %l | PID_term %l(cm) \n\r",
+                                   curlcm, target_lcm, curlcm-target_lcm,
+                                   e_derivative, integral, PID_term);
+        }
+
+        // store for less info
+        e_prev = e;
+        integral_prev = integral;
+
+        // according to distance, now, decide a pwm;
+        //float stop_cm = 30; // max speed distance   //GLOBAL = lcm
+        int32_t error_dist = PID_term; // distance
+        int32_t DtoPWM_Percent = 1; // err_dist:pwm = 1:1
+        //int32_t t_gpwm = DtoPWM_Percent * error_dist;
+        int32_t t_gpwm = PID_term; //testing
+        //_gpwm = (t_gpwm*10);
+        //t_gpwm 0=>30;
+        //t_gpwm 50=>35+30;
+        //t_gpwm 100=>100;
+
+
+        if(t_gpwm > 0) {
+            DirectionBack();
+            //DirectionFront();
+            //printf(EUSCI_A0_BASE,"Mode: Front, t_gpwm %l\n\r", t_gpwm);
+        } else if (t_gpwm < 0){
+            t_gpwm = t_gpwm * -1;
+            DirectionFront();
+            //printf(EUSCI_A0_BASE,"Mode: Back, t_gpwm %l\n\r", t_gpwm);
+            //DirectionBack();
+        }
+        int32_t range = 100-30;
+        int32_t base = 30;
+        t_gpwm = ((t_gpwm*range)/100) + base;
+
+        if(t_gpwm > 100)
+            t_gpwm = 100;
+        else if( t_gpwm <= 30)
+             t_gpwm = 0;
+
+        gpwm = (uint16_t)t_gpwm;
+        rover_speed_duty(gpwm, false);
+        if(cntDist > 20) {
+            //printf(EUSCI_A0_BASE, "%u% pwmL-1\n\r", gpwm);
+            //printf(EUSCI_A0_BASE, "%l% pwmL\n\r", t_gpwm);
+            //Timer_A_setCompareValue(TIMER_A1_BASE, RIGHT, gpwm*10);
+            //Timer_A_setCompareValue(TIMER_A1_BASE, LEFT, gpwm*10);
+            int32_t upper = distance;
+            int32_t lower = (distance*1000) - (upper*1000);
+            /*if(cntDist > 20) {
+                printf(EUSCI_A0_BASE,"*** adcDistVal %n distance %l.%l ***\n\r",
+                                           adcDistVal, upper, lower);
+            }*/
+            printf(EUSCI_A0_BASE, "(%n distADC(MEM0) %l.%l(cm) | %i encoderL | %u% pwmL)\n\r",
+                                                adcDistVal, upper, lower, counter, gpwm);
+            //printf(EUSCI_A0_BASE,"gpwm %i error_dist \n\r", gpwm, error_pwm);
+            cntDist = 0;
+        }
+    /*
+    // online version (not working)
+    // adcDistVal -> curlcm // formular *slop
+    float slop = 1;
+    float curlcm = slop * adcDistVal;
+    static float lastInput;
+    // target
+    //lcm
+
+    //errcm = curlcm - lcm;
+
+    //gpwm = x;
+    rover_speed_duty(gpwm);
+
+    //Compute all the working error variables/
+    // lcm = target
+    float error = lcm - curlcm;  //curlcm: input, +:forward, -:backward
+    float ITerm = lastOutput
+    ITerm += (ki * error);
+    // ITerm =
+    // ITerm = lastOutput;
+
+    float outMax = 100;
+    float outMin = 0;
+
+    if(ITerm > outMax) ITerm = outMax;
+    else if(ITerm < outMin) ITerm= outMin;
+    float dInput = (curlcm - lastInput);
+
+    //Compute PID Output
+    float output = kp * error + ITerm - kd * dInput;
+
+    if(output > outMax) output = outMax;
+    else if(output < outMin) output = outMin;
+    *myOutput = output;
+
+    //Remember some variables for next time
+    lastInput = input;
+    lastOutput =
+    */
     }
 }
 
@@ -691,7 +959,8 @@ void PORT4_IRQHandler(void){ //Port 4 interrupt
     static int cnt = 0;
     uint64_t status = GPIO_getEnabledInterruptStatus(GPIO_PORT_P4);
     GPIO_clearInterruptFlag(GPIO_PORT_P4, status);
-    if((status & GPIO_PIN6) || (status & GPIO_PIN7)) {
+    if((status & GPIO_PIN6) || (status & GPIO_PIN7) ||
+       (status & GPIO_PIN4) || (status & GPIO_PIN5)) {
         EncodeSigA = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN4);
         EncodeSigB = GPIO_getInputPinValue(GPIO_PORT_P4, GPIO_PIN5);
         // state machine
@@ -703,16 +972,16 @@ void PORT4_IRQHandler(void){ //Port 4 interrupt
                 if ((EncodeSigA == 0x00) && (EncodeSigB == 0x01)) {
                     NewCurStat = AA; counter--;
                     isNotClockwise = true; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x00)) {
                     NewCurStat = CC; counter++;
                     isNotClockwise = false; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else {
                     islost = true;
-                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                    //printf(EUSCI_A0_BASE, "lost steps\n\r");
                 }
                 break;
             case AA:
@@ -722,16 +991,16 @@ void PORT4_IRQHandler(void){ //Port 4 interrupt
                 if ((EncodeSigA == 0x01) && (EncodeSigB == 0x01)) {
                     NewCurStat = BB; counter--;
                     isNotClockwise = true; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00)) {
                     NewCurStat = DD; counter++;
                     isNotClockwise = false; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else {
                     islost = true;
-                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                    //printf(EUSCI_A0_BASE, "lost steps\n\r");
                 }
                 break;
             case BB:
@@ -741,16 +1010,16 @@ void PORT4_IRQHandler(void){ //Port 4 interrupt
                 if ((EncodeSigA == 0x01) && EncodeSigB == 0x00) {
                     NewCurStat = CC; counter--;
                     isNotClockwise = true; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else if ((EncodeSigA == 0x00) && (EncodeSigB == 0x01)) {
                     NewCurStat = AA; counter++;
                     isNotClockwise = false; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else {
                     islost = true;
-                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                    //printf(EUSCI_A0_BASE, "lost steps\n\r");
                 }
                 break;
             case CC:
@@ -760,16 +1029,16 @@ void PORT4_IRQHandler(void){ //Port 4 interrupt
                 if ((EncodeSigA == 0x00) && (EncodeSigB == 0x00)) {
                     NewCurStat = DD; counter--;
                     isNotClockwise = true; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else if ((EncodeSigA == 0x01) && (EncodeSigB == 0x01)) {
                     NewCurStat = BB; counter++;
                     isNotClockwise = false; islost = false;
-                    if (isNotClockwise != oldisNotClockwise)
-                        printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
+                    //if (isNotClockwise != oldisNotClockwise)
+                        //printf(EUSCI_A0_BASE, "***Direction changed***\n\r");
                 } else {
                     islost = true;
-                    printf(EUSCI_A0_BASE, "lost steps\n\r");
+                    //printf(EUSCI_A0_BASE, "lost steps\n\r");
                 }
                 break;
         }
